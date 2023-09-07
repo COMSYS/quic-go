@@ -26,9 +26,8 @@ func LogFrame(logger utils.Logger, frame Frame, sent bool) {
 	case *ResetStreamFrame:
 		logger.Debugf("\t%s &wire.ResetStreamFrame{StreamID: %d, ErrorCode: %#x, FinalSize: %d}", dir, f.StreamID, f.ErrorCode, f.FinalSize)
 	case *AckFrame:
-		hasECN := f.ECT0 > 0 || f.ECT1 > 0 || f.ECNCE > 0
 		var ecn string
-		if hasECN {
+		if f.HasECN() {
 			ecn = fmt.Sprintf(", ECT0: %d, ECT1: %d, CE: %d", f.ECT0, f.ECT1, f.ECNCE)
 		}
 		if len(f.AckRanges) > 1 {

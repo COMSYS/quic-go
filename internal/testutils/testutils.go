@@ -30,7 +30,7 @@ func packRawPayload(version protocol.VersionNumber, frames []wire.Frame) []byte 
 // ComposeInitialPacket returns an Initial packet encrypted under key
 // (the original destination connection ID) containing specified frames
 func ComposeInitialPacket(srcConnID protocol.ConnectionID, destConnID protocol.ConnectionID, version protocol.VersionNumber, key protocol.ConnectionID, frames []wire.Frame) []byte {
-	sealer, _ := handshake.NewInitialAEAD(key, protocol.PerspectiveServer, version)
+	sealer, _ := handshake.NewInitialAEAD(key, protocol.PerspectiveServer, version, nil)
 
 	// compose payload
 	var payload []byte

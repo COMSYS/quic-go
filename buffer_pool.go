@@ -8,6 +8,7 @@ import (
 
 type packetBuffer struct {
 	Data []byte
+	TOS  protocol.TOS
 
 	// refCount counts how many packets Data is used in.
 	// It doesn't support concurrent use.
@@ -68,6 +69,7 @@ func getPacketBuffer() *packetBuffer {
 	buf := bufferPool.Get().(*packetBuffer)
 	buf.refCount = 1
 	buf.Data = buf.Data[:0]
+	buf.TOS = protocol.TOSDefault
 	return buf
 }
 
@@ -75,6 +77,7 @@ func init() {
 	bufferPool.New = func() interface{} {
 		return &packetBuffer{
 			Data: make([]byte, 0, protocol.MaxPacketBufferSize),
+			TOS:  protocol.TOSDefault,
 		}
 	}
 }

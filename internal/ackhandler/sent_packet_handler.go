@@ -25,6 +25,38 @@ const (
 	minRTTAfterRetry = 5 * time.Millisecond
 )
 
+type ECNMode uint8
+
+const (
+	DisableECN ECNMode = 0x00
+	// Enable ECN by sending packets marked as ECT(0)
+	UseECT0 ECNMode = 0x01
+	// Enable ECN by sending packets marked as ECT(1)
+	UseECT1 ECNMode = 0x02
+	// After successful ECN validation, deliberately send a CE-marked packet
+	TryCE ECNMode = 0x04
+)
+
+func (m ECNMode) IsValid() bool {
+	// At most one of UseECT{0,1} may be set
+	return m&0x03 != 0x03
+}
+
+type ecnState int8
+
+const (
+	ecnCapable ecnState = -2
+	ecnFailed  ecnState = -1
+	ecnUnknown ecnState = 0
+	// COMSYS zgrabber patch: RFC 9000 recommends 10 ECN validation packets,
+	// but we only send half the number of PTO probes for initial packets
+	ecnTesting ecnState = 5
+)
+
+func (s ecnState) IsValidating() bool {
+	return s >= 0
+}
+
 type packetNumberSpace struct {
 	history *sentPacketHistory
 	pns     packetNumberGenerator
@@ -34,6 +66,7 @@ type packetNumberSpace struct {
 
 	largestAcked protocol.PacketNumber
 	largestSent  protocol.PacketNumber
+	ect, ecnce   uint64 // from latest ACK
 }
 
 func newPacketNumberSpace(initialPN protocol.PacketNumber, skipPNs bool, rttStats *utils.RTTStats) *packetNumberSpace {
@@ -87,6 +120,18 @@ type sentPacketHandler struct {
 	// Only applies to the application-data packet number space.
 	numProbesToSend int
 
+	// If <= 0: fixed ECN state (capable, failed, or unknown)
+	// If  > 0: number of packets to mark for ECN validation
+	ecnState ecnState
+	// The number of ECN validation packets marked lost.
+	ecnLost uint8
+	// The number of ECN validation packets reported as CE
+	ecnCE uint8
+	// The ECN codepoint to use on outgoing packets
+	ecnCodepoint protocol.ECN
+	// The number of packets to send marked CE after successful ECN validation
+	ecnTryCE uint8
+
 	// The alarm timeout
 	alarm time.Time
 
@@ -105,6 +150,7 @@ func newSentPacketHandler(
 	initialPN protocol.PacketNumber,
 	initialMaxDatagramSize protocol.ByteCount,
 	rttStats *utils.RTTStats,
+	ecnMode ECNMode,
 	pers protocol.Perspective,
 	tracer logging.ConnectionTracer,
 	logger utils.Logger,
@@ -117,6 +163,21 @@ func newSentPacketHandler(
 		tracer,
 	)
 
+	ecnState := ecnFailed
+	ecnCodepoint := protocol.ECNNon
+	ecnTryCE := uint8(0)
+	switch ecnMode & (UseECT0 | UseECT1) {
+	case UseECT0:
+		ecnState = ecnTesting
+		ecnCodepoint = protocol.ECT0
+	case UseECT1:
+		ecnState = ecnTesting
+		ecnCodepoint = protocol.ECT1
+	}
+	if ecnMode&TryCE != 0 {
+		ecnTryCE = 2
+	}
+
 	return &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient,
@@ -125,6 +186,9 @@ func newSentPacketHandler(
 		appDataPackets:                 newPacketNumberSpace(0, true, rttStats),
 		rttStats:                       rttStats,
 		congestion:                     congestion,
+		ecnState:                       ecnState,
+		ecnCodepoint:                   ecnCodepoint,
+		ecnTryCE:                       ecnTryCE,
 		perspective:                    pers,
 		tracer:                         tracer,
 		logger:                         logger,
@@ -288,7 +352,10 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		}
 	}
 
-	pnSpace.largestAcked = utils.MaxPacketNumber(pnSpace.largestAcked, largestAcked)
+	largestAckedIncreased := largestAcked > pnSpace.largestAcked
+	if largestAckedIncreased {
+		pnSpace.largestAcked = largestAcked
+	}
 
 	// Servers complete address validation when a protected packet is received.
 	if h.perspective == protocol.PerspectiveClient && !h.peerCompletedAddressValidation &&
@@ -305,22 +372,23 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		return false, err
 	}
 	// update the RTT, if the largest acked is newly acknowledged
-	if len(ackedPackets) > 0 {
-		if p := ackedPackets[len(ackedPackets)-1]; p.PacketNumber == ack.LargestAcked() {
-			// don't use the ack delay for Initial and Handshake packets
-			var ackDelay time.Duration
-			if encLevel == protocol.Encryption1RTT {
-				ackDelay = utils.MinDuration(ack.DelayTime, h.rttStats.MaxAckDelay())
-			}
-			h.rttStats.UpdateRTT(rcvTime.Sub(p.SendTime), ackDelay, rcvTime)
-			if h.logger.Debug() {
-				h.logger.Debugf("\tupdated RTT: %s (σ: %s)", h.rttStats.SmoothedRTT(), h.rttStats.MeanDeviation())
-			}
-			h.congestion.MaybeExitSlowStart()
+	if p := ackedPackets[len(ackedPackets)-1]; p.PacketNumber == largestAcked {
+		// don't use the ack delay for Initial and Handshake packets
+		var ackDelay time.Duration
+		if encLevel == protocol.Encryption1RTT {
+			ackDelay = utils.MinDuration(ack.DelayTime, h.rttStats.MaxAckDelay())
 		}
+		h.rttStats.UpdateRTT(rcvTime.Sub(p.SendTime), ackDelay, rcvTime)
+		if h.logger.Debug() {
+			h.logger.Debugf("\tupdated RTT: %s (σ: %s)", h.rttStats.SmoothedRTT(), h.rttStats.MeanDeviation())
+		}
+		h.congestion.MaybeExitSlowStart()
 	}
 	if err := h.detectLostPackets(rcvTime, encLevel); err != nil {
 		return false, err
+	}
+	if h.ecnState != ecnFailed {
+		h.processECNCounts(ack, encLevel, largestAckedIncreased, ackedPackets)
 	}
 	var acked1RTTPacket bool
 	for _, p := range ackedPackets {
@@ -423,6 +491,125 @@ func (h *sentPacketHandler) detectAndRemoveAckedPackets(ack *wire.AckFrame, encL
 	}
 
 	return h.ackedPackets, err
+}
+
+func (h *sentPacketHandler) processECNCounts(ack *wire.AckFrame, encLevel protocol.EncryptionLevel, largestAckedIncreased bool, ackedPackets []*Packet) {
+	sentCP := h.ecnCodepoint
+	unusedCP := sentCP ^ 0b11 // 0b10 <-> 0b01
+	var ackECT, ackUnused uint64
+	switch sentCP {
+	case protocol.ECT0:
+		ackECT = ack.ECT0
+		ackUnused = ack.ECT1
+	case protocol.ECT1:
+		ackECT = ack.ECT1
+		ackUnused = ack.ECT0
+	default:
+		panic(fmt.Sprintf("default ECN codepoint is %#b", sentCP))
+	}
+
+	pnSpace := h.getPacketNumberSpace(encLevel)
+	var ect, ecnce uint64
+	lost := ackedPackets[len(ackedPackets)-1] // packet to potentially pass to congestion.OnPacketLost()
+	for _, p := range ackedPackets {
+		switch p.TOS.ECN() {
+		case sentCP:
+			ect++
+			lost = p // use last marked packet, if any
+		case protocol.ECNCE:
+			ecnce++
+			lost = p // use last marked packet, if any
+		case unusedCP:
+			h.logger.Errorf(
+				"BUG: unexpected ECT(%d) packet with pn %d (%s)",
+				unusedCP&1, p.PacketNumber, p.EncryptionLevel,
+			)
+		}
+	}
+
+	if largestAckedIncreased {
+		// Perform ECN validation
+		if !ack.HasECN() {
+			if ect > 0 || ecnce > 0 {
+				h.updateECNState(ecnFailed, logging.ECNValidationMissingCounters)
+				return
+			}
+			return // nothing to validate/process
+		}
+		if ackECT < pnSpace.ect {
+			result := logging.ECNValidationDecreasingECT0
+			if sentCP == protocol.ECT1 {
+				result = logging.ECNValidationDecreasingECT1
+			}
+			h.updateECNState(ecnFailed, result)
+			return
+		}
+		if ack.ECNCE < pnSpace.ecnce {
+			h.updateECNState(ecnFailed, logging.ECNValidationDecreasingCE)
+			return
+		}
+		if ackUnused > 0 {
+			// h.GetTOS() never sets the unused ECN codepoint
+			reason := logging.ECNValidationIllegalECT1
+			if sentCP == protocol.ECT1 {
+				reason = logging.ECNValidationIllegalECT0
+			}
+			h.updateECNState(ecnFailed, reason)
+			return
+		}
+
+		deltaCE := ack.ECNCE - pnSpace.ecnce
+		if ecnce > deltaCE {
+			h.updateECNState(ecnFailed, logging.ECNValidationMissingCE)
+			return
+		}
+		deltaECT := (ackECT - pnSpace.ect) + (deltaCE - ecnce) // ECT may be re-marked to CE
+		if ect > deltaECT {
+			reason := logging.ECNValidationMissingECT0
+			if sentCP == protocol.ECT1 {
+				reason = logging.ECNValidationMissingECT1
+			}
+			h.updateECNState(ecnFailed, reason)
+			return
+		}
+
+		h.logger.Debugf("\tECN validation passed")
+		if h.ecnState.IsValidating() && ackECT > 0 {
+			// The validation stage can only be left after at least one non-CE echo
+			// has been received. Otherwise, validation could still fail due to all-CE.
+			h.updateECNState(ecnCapable, logging.ECNValidationSuccess)
+		}
+	}
+
+	// The local CE count needs to be compensated for ACKed packets that were
+	// originally sent with a CE mark. Otherwise, ACKs could mistakenly triger
+	// a congestion response because their CE count includes these packets.
+	pnSpace.ecnce += ecnce
+
+	// If ack doesn't contain ECN counts (ack.EC* == 0), these will always be false
+	if ack.ECNCE > pnSpace.ecnce {
+		if h.ecnState.IsValidating() {
+			h.ecnCE += uint8(ack.ECNCE - pnSpace.ecnce) // over-counts on coalesced packets
+			if h.ecnCE >= uint8(ecnTesting) {
+				h.updateECNState(ecnFailed, logging.ECNValidationAllCE)
+				return
+			}
+		}
+		lost.declaredLost = true // to circumvent congestion.OnPacketAcked() call in h.ReceivedAck()
+		h.congestion.OnPacketLost(lost.PacketNumber, lost.Length, h.bytesInFlight)
+		pnSpace.ecnce = ack.ECNCE
+	}
+	if ackECT > pnSpace.ect {
+		pnSpace.ect = ackECT
+	}
+}
+
+func (h *sentPacketHandler) updateECNState(newState ecnState, result logging.ECNValidationResult) {
+	h.ecnState = newState
+	if h.tracer != nil {
+		h.tracer.ValidatedECN(result)
+	}
+	h.logger.Debugf("ECN validation updated: %s", result)
 }
 
 func (h *sentPacketHandler) getLossTimeAndSpace() (time.Time, protocol.EncryptionLevel) {
@@ -596,12 +783,23 @@ func (h *sentPacketHandler) detectLostPackets(now time.Time, encLevel protocol.E
 			// the bytes in flight need to be reduced no matter if the frames in this packet will be retransmitted
 			h.removeFromBytesInFlight(p)
 			h.queueFramesForRetransmission(p)
+			h.checkECNValidationLoss(p)
 			if !p.IsPathMTUProbePacket {
 				h.congestion.OnPacketLost(p.PacketNumber, p.Length, priorInFlight)
 			}
 		}
 		return true, nil
 	})
+}
+
+func (h *sentPacketHandler) checkECNValidationLoss(p *Packet) {
+	if !h.ecnState.IsValidating() || p.TOS.ECN() == protocol.ECNNon {
+		return
+	}
+	h.ecnLost++ // over-counts on coalesced packets
+	if h.ecnLost >= uint8(ecnTesting) {
+		h.updateECNState(ecnFailed, logging.ECNValidationAllLost)
+	}
 }
 
 func (h *sentPacketHandler) OnLossDetectionTimeout() error {
@@ -655,6 +853,8 @@ func (h *sentPacketHandler) OnLossDetectionTimeout() error {
 	//nolint:exhaustive // We never arm a PTO timer for 0-RTT packets.
 	switch encLevel {
 	case protocol.EncryptionInitial:
+		//COMSYS zgrabber patch: do not resend two initial probes, but only a single one to avoid annoying people
+		h.numProbesToSend -= 1
 		h.ptoMode = SendPTOInitial
 	case protocol.EncryptionHandshake:
 		h.ptoMode = SendPTOHandshake
@@ -688,6 +888,31 @@ func (h *sentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel) 
 
 func (h *sentPacketHandler) PopPacketNumber(encLevel protocol.EncryptionLevel) protocol.PacketNumber {
 	return h.getPacketNumberSpace(encLevel).pns.Pop()
+}
+
+func (h *sentPacketHandler) GetTOS(isAckEliciting bool) protocol.TOS {
+	switch h.ecnState {
+	case ecnCapable:
+		if h.ecnTryCE > 0 {
+			h.ecnTryCE--
+			return protocol.ECNCE.ToTOS()
+		}
+		return h.ecnCodepoint.ToTOS()
+	case ecnFailed, ecnUnknown:
+		return protocol.TOSDefault
+	}
+	if h.ecnState <= 0 {
+		panic("invalid ecnState")
+	}
+
+	// Attempt ECN validation according to RFC 9000, appendix A.4
+	if !isAckEliciting {
+		// Non-ack-eliciting packets aren't tracked by sentPacketHandler, thus
+		// losses will never be noticed. This means they aren't suitable for ECN validation.
+		return protocol.TOSDefault
+	}
+	h.ecnState-- // reduce outstanding validation packets
+	return h.ecnCodepoint.ToTOS()
 }
 
 func (h *sentPacketHandler) SendMode() SendMode {
@@ -762,6 +987,7 @@ func (h *sentPacketHandler) QueueProbePacket(encLevel protocol.EncryptionLevel) 
 	// Keep track of acknowledged frames instead.
 	h.removeFromBytesInFlight(p)
 	p.declaredLost = true
+	h.checkECNValidationLoss(p)
 	return true
 }
 
@@ -812,6 +1038,11 @@ func (h *sentPacketHandler) ResetForRetry() error {
 	}
 	h.initialPackets = newPacketNumberSpace(h.initialPackets.pns.Pop(), false, h.rttStats)
 	h.appDataPackets = newPacketNumberSpace(h.appDataPackets.pns.Pop(), true, h.rttStats)
+	if h.ecnState.IsValidating() {
+		h.ecnState = ecnTesting
+		h.ecnLost = 0
+		h.ecnCE = 0
+	}
 	oldAlarm := h.alarm
 	h.alarm = time.Time{}
 	if h.tracer != nil {

@@ -94,13 +94,17 @@ func parseAckFrame(r *bytes.Reader, ackDelayExponent uint8, _ protocol.VersionNu
 		return nil, errInvalidAckRanges
 	}
 
-	// parse (and skip) the ECN section
+	// parse the ECN section
 	if ecn {
+		var counts [3]uint64
 		for i := 0; i < 3; i++ {
-			if _, err := quicvarint.Read(r); err != nil {
+			if counts[i], err = quicvarint.Read(r); err != nil {
 				return nil, err
 			}
 		}
+		frame.ECT0 = counts[0]
+		frame.ECT1 = counts[1]
+		frame.ECNCE = counts[2]
 	}
 
 	return frame, nil
@@ -108,8 +112,7 @@ func parseAckFrame(r *bytes.Reader, ackDelayExponent uint8, _ protocol.VersionNu
 
 // Write writes an ACK frame.
 func (f *AckFrame) Write(b *bytes.Buffer, _ protocol.VersionNumber) error {
-	hasECN := f.ECT0 > 0 || f.ECT1 > 0 || f.ECNCE > 0
-	if hasECN {
+	if f.HasECN() {
 		b.WriteByte(0x3)
 	} else {
 		b.WriteByte(0x2)
@@ -131,7 +134,7 @@ func (f *AckFrame) Write(b *bytes.Buffer, _ protocol.VersionNumber) error {
 		quicvarint.Write(b, len)
 	}
 
-	if hasECN {
+	if f.HasECN() {
 		quicvarint.Write(b, f.ECT0)
 		quicvarint.Write(b, f.ECT1)
 		quicvarint.Write(b, f.ECNCE)
@@ -155,7 +158,7 @@ func (f *AckFrame) Length(version protocol.VersionNumber) protocol.ByteCount {
 		length += quicvarint.Len(gap)
 		length += quicvarint.Len(len)
 	}
-	if f.ECT0 > 0 || f.ECT1 > 0 || f.ECNCE > 0 {
+	if f.HasECN() {
 		length += quicvarint.Len(f.ECT0)
 		length += quicvarint.Len(f.ECT1)
 		length += quicvarint.Len(f.ECNCE)
@@ -244,6 +247,11 @@ func (f *AckFrame) AcksPacket(p protocol.PacketNumber) bool {
 	})
 	// i will always be < len(f.AckRanges), since we checked above that p is not bigger than the largest acked
 	return p <= f.AckRanges[i].Largest
+}
+
+// HasECN returns whether this frame reports ECN counts
+func (f *AckFrame) HasECN() bool {
+	return f.ECT0 > 0 || f.ECT1 > 0 || f.ECNCE > 0
 }
 
 func encodeAckDelay(delay time.Duration) uint64 {

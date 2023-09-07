@@ -350,3 +350,6 @@ func (mr *MockConnectionTracerMockRecorder) UpdatedPTOCount(arg0 interface{}) *g
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatedPTOCount", reflect.TypeOf((*MockConnectionTracer)(nil).UpdatedPTOCount), arg0)
 }
+
+func (m *MockConnectionTracer) H3SentHeader() {}
+func (m *MockConnectionTracer) H3Frame(s logging.StreamID, i interface{}) {}

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -42,6 +43,30 @@ const (
 	ECT0              // 10
 	ECNCE             // 11
 )
+
+func (e ECN) ToTOS() TOS {
+	return TOS(e)
+}
+
+type TOS uint8
+
+const TOSDefault TOS = 0
+
+func (t *TOS) SetDSCP(dscp uint8) error {
+	if dscp >= (1 << 6) {
+		return errors.New("invalid DiffServ codepoint")
+	}
+	*t = TOS((dscp << 2) | uint8(t.ECN()))
+	return nil
+}
+
+func (t TOS) ECN() ECN {
+	return ECN(t & 0b11)
+}
+
+func (t *TOS) SetECN(ecn ECN) {
+	*t = TOS((uint8(*t) &^ 0b11) | uint8(ecn))
+}
 
 // A ByteCount in QUIC
 type ByteCount int64

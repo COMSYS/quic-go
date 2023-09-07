@@ -72,8 +72,6 @@ type receivedPacket struct {
 	rcvTime    time.Time
 	data       []byte
 
-	ecn protocol.ECN
-
 	info *packetInfo
 }
 
@@ -85,7 +83,6 @@ func (p *receivedPacket) Clone() *receivedPacket {
 		rcvTime:    p.rcvTime,
 		data:       p.data,
 		buffer:     p.buffer,
-		ecn:        p.ecn,
 		info:       p.info,
 	}
 }
@@ -211,6 +208,8 @@ type session struct {
 	// pacingDeadline is the time when the next packet should be sent
 	pacingDeadline time.Time
 
+	largestPacketNumber protocol.PacketNumber
+
 	peerParams *wire.TransportParameters
 
 	timer *utils.Timer
@@ -292,6 +291,7 @@ var newSession = func(
 		0,
 		getMaxPacketSize(s.conn.RemoteAddr()),
 		s.rttStats,
+		conf.ECNMode,
 		s.perspective,
 		s.tracer,
 		s.logger,
@@ -352,6 +352,7 @@ var newSession = func(
 		initialStream,
 		handshakeStream,
 		s.sentPacketHandler,
+		s.sentPacketHandler,
 		s.retransmissionQueue,
 		s.RemoteAddr(),
 		cs,
@@ -385,7 +386,6 @@ var newClientSession = func(
 	s := &session{
 		conn:                  conn,
 		config:                conf,
-		origDestConnID:        destConnID,
 		handshakeDestConnID:   destConnID,
 		srcConnIDLen:          srcConnID.Len(),
 		perspective:           protocol.PerspectiveClient,
@@ -395,6 +395,10 @@ var newClientSession = func(
 		tracer:                tracer,
 		versionNegotiated:     hasNegotiatedVersion,
 		version:               v,
+	}
+	is27 := v == protocol.VersionDraft27
+	if !is27 {
+		s.origDestConnID = destConnID
 	}
 	s.connIDManager = newConnIDManager(
 		destConnID,
@@ -419,6 +423,7 @@ var newClientSession = func(
 		initialPacketNumber,
 		getMaxPacketSize(s.conn.RemoteAddr()),
 		s.rttStats,
+		conf.ECNMode,
 		s.perspective,
 		s.tracer,
 		s.logger,
@@ -476,6 +481,7 @@ var newClientSession = func(
 		initialStream,
 		handshakeStream,
 		s.sentPacketHandler,
+		s.sentPacketHandler,
 		s.retransmissionQueue,
 		s.RemoteAddr(),
 		cs,
@@ -496,6 +502,10 @@ var newClientSession = func(
 		}
 	}
 	return s
+}
+
+func (s *session) LogH3Frame(str ReceiveStream, i interface{}) {
+	s.tracer.H3Frame(str.StreamID(), i)
 }
 
 func (s *session) preSetup() {
@@ -970,6 +980,15 @@ func (s *session) handleSinglePacket(p *receivedPacket, hdr *wire.Header) bool /
 		return false
 	}
 
+	if s.perspective == protocol.PerspectiveClient {
+		if packet.packetNumber > s.largestPacketNumber {
+			s.largestPacketNumber = packet.packetNumber
+			if !hdr.IsLongHeader {
+				s.packer.SetLatestSpinBit(hdr.SpinBit)
+			}
+		}
+	}
+
 	if s.logger.Debug() {
 		s.logger.Debugf("<- Reading packet %d (%d bytes) for connection %s, %s", packet.packetNumber, p.Size(), hdr.DestConnectionID, packet.encryptionLevel)
 		packet.hdr.Log(s.logger)
@@ -983,7 +1002,7 @@ func (s *session) handleSinglePacket(p *receivedPacket, hdr *wire.Header) bool /
 		return false
 	}
 
-	if err := s.handleUnpackedPacket(packet, p.ecn, p.rcvTime, p.Size()); err != nil {
+	if err := s.handleUnpackedPacket(packet, p.buffer.TOS.ECN(), p.rcvTime, p.Size()); err != nil {
 		s.closeLocal(err)
 		return false
 	}
@@ -1036,6 +1055,10 @@ func (s *session) handleRetryPacket(hdr *wire.Header, data []byte) bool /* was t
 	}
 	if s.tracer != nil {
 		s.tracer.ReceivedRetry(hdr)
+	}
+	is27 := s.version == protocol.VersionDraft27
+	if is27 {
+		s.origDestConnID = s.handshakeDestConnID
 	}
 	newDestConnID := hdr.SrcConnectionID
 	s.receivedRetry = true
@@ -1577,6 +1600,19 @@ func (s *session) checkTransportParameters(params *wire.TransportParameters) err
 		s.tracer.ReceivedTransportParameters(params)
 	}
 
+	is27 := s.version == protocol.VersionDraft27
+
+	if is27 {
+		// check the Retry token
+		if !params.OriginalDestinationConnectionID.Equal(s.origDestConnID) {
+			return &qerr.TransportError{
+				ErrorCode:    qerr.TransportParameterError,
+				ErrorMessage: fmt.Sprintf("expected original_connection_id to equal %s, is %s", s.origDestConnID, params.OriginalDestinationConnectionID),
+			}
+		}
+		return nil
+	}
+
 	// check the initial_source_connection_id
 	if !params.InitialSourceConnectionID.Equal(s.handshakeDestConnID) {
 		return fmt.Errorf("expected initial_source_connection_id to equal %s, is %s", s.handshakeDestConnID, params.InitialSourceConnectionID)
@@ -1585,6 +1621,7 @@ func (s *session) checkTransportParameters(params *wire.TransportParameters) err
 	if s.perspective == protocol.PerspectiveServer {
 		return nil
 	}
+
 	// check the original_destination_connection_id
 	if !params.OriginalDestinationConnectionID.Equal(s.origDestConnID) {
 		return fmt.Errorf("expected original_destination_connection_id to equal %s, is %s", s.origDestConnID, params.OriginalDestinationConnectionID)
@@ -1599,6 +1636,7 @@ func (s *session) checkTransportParameters(params *wire.TransportParameters) err
 	} else if params.RetrySourceConnectionID != nil {
 		return errors.New("received retry_source_connection_id, although no Retry was performed")
 	}
+
 	return nil
 }
 
@@ -1811,7 +1849,7 @@ func (s *session) sendConnectionClose(e error) ([]byte, error) {
 		return nil, err
 	}
 	s.logCoalescedPacket(packet)
-	return packet.buffer.Data, s.conn.Write(packet.buffer.Data)
+	return packet.buffer.Data, s.conn.Write(packet.buffer.Data, packet.buffer.TOS)
 }
 
 func (s *session) logPacketContents(p *packetContents) {
@@ -1840,9 +1878,9 @@ func (s *session) logPacketContents(p *packetContents) {
 func (s *session) logCoalescedPacket(packet *coalescedPacket) {
 	if s.logger.Debug() {
 		if len(packet.packets) > 1 {
-			s.logger.Debugf("-> Sending coalesced packet (%d parts, %d bytes) for connection %s", len(packet.packets), packet.buffer.Len(), s.logID)
+			s.logger.Debugf("-> Sending coalesced packet (%d parts, %d bytes, TOS %#x) for connection %s", len(packet.packets), packet.buffer.Len(), packet.buffer.TOS, s.logID)
 		} else {
-			s.logger.Debugf("-> Sending packet %d (%d bytes) for connection %s, %s", packet.packets[0].header.PacketNumber, packet.buffer.Len(), s.logID, packet.packets[0].EncryptionLevel())
+			s.logger.Debugf("-> Sending packet %d (%d bytes, TOS %#x) for connection %s, %s", packet.packets[0].header.PacketNumber, packet.buffer.Len(), packet.buffer.TOS, s.logID, packet.packets[0].EncryptionLevel())
 		}
 	}
 	for _, p := range packet.packets {
@@ -1852,7 +1890,7 @@ func (s *session) logCoalescedPacket(packet *coalescedPacket) {
 
 func (s *session) logPacket(packet *packedPacket) {
 	if s.logger.Debug() {
-		s.logger.Debugf("-> Sending packet %d (%d bytes) for connection %s, %s", packet.header.PacketNumber, packet.buffer.Len(), s.logID, packet.EncryptionLevel())
+		s.logger.Debugf("-> Sending packet %d (%d bytes, TOS %#x) for connection %s, %s", packet.header.PacketNumber, packet.buffer.Len(), packet.buffer.TOS, s.logID, packet.EncryptionLevel())
 	}
 	s.logPacketContents(packet.packetContents)
 }

@@ -63,7 +63,7 @@ func (h *sendQueue) Run() error {
 			// make sure that all queued packets are actually sent out
 			shouldClose = true
 		case p := <-h.queue:
-			if err := h.conn.Write(p.Data); err != nil {
+			if err := h.conn.Write(p.Data, p.TOS); err != nil {
 				return err
 			}
 			p.Release()

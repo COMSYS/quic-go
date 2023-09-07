@@ -206,13 +206,15 @@ func (a *updatableAEAD) open(dst, src []byte, rcvTime time.Time, pn protocol.Pac
 				ErrorMessage: "keys updated too quickly",
 			}
 		}
+		newRcvKey := a.nextRcvTrafficSecret
+		newSendKey := a.nextSendTrafficSecret
 		a.rollKeys()
 		a.logger.Debugf("Peer updated keys to %d", a.keyPhase)
 		// The peer initiated this key update. It's safe to drop the keys for the previous generation now.
 		// Start a timer to drop the previous key generation.
 		a.startKeyDropTimer(rcvTime)
 		if a.tracer != nil {
-			a.tracer.UpdatedKey(a.keyPhase, true)
+			a.tracer.UpdatedKey(a.keyPhase, true, newRcvKey, newSendKey)
 		}
 		a.firstRcvdWithCurrentKey = pn
 		return dec, err
@@ -295,10 +297,12 @@ func (a *updatableAEAD) shouldInitiateKeyUpdate() bool {
 
 func (a *updatableAEAD) KeyPhase() protocol.KeyPhaseBit {
 	if a.shouldInitiateKeyUpdate() {
+		newRcvKey := a.nextRcvTrafficSecret
+		newSendKey := a.nextSendTrafficSecret
 		a.rollKeys()
 		a.logger.Debugf("Initiating key update to key phase %d", a.keyPhase)
 		if a.tracer != nil {
-			a.tracer.UpdatedKey(a.keyPhase, false)
+			a.tracer.UpdatedKey(a.keyPhase, false, newRcvKey, newSendKey)
 		}
 	}
 	return a.keyPhase.Bit()

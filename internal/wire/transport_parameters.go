@@ -85,11 +85,13 @@ type TransportParameters struct {
 	ActiveConnectionIDLimit uint64
 
 	MaxDatagramFrameSize protocol.ByteCount
+
+	Unknown map[transportParameterID][]byte
 }
 
 // Unmarshal the transport parameters
-func (p *TransportParameters) Unmarshal(data []byte, sentBy protocol.Perspective) error {
-	if err := p.unmarshal(bytes.NewReader(data), sentBy, false); err != nil {
+func (p *TransportParameters) Unmarshal(data []byte, sentBy protocol.Perspective, is27 bool) error {
+	if err := p.unmarshal(bytes.NewReader(data), sentBy, false, is27); err != nil {
 		return &qerr.TransportError{
 			ErrorCode:    qerr.TransportParameterError,
 			ErrorMessage: err.Error(),
@@ -98,7 +100,7 @@ func (p *TransportParameters) Unmarshal(data []byte, sentBy protocol.Perspective
 	return nil
 }
 
-func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspective, fromSessionTicket bool) error {
+func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspective, fromSessionTicket bool, is27 bool) error {
 	// needed to check that every parameter is only sent at most once
 	var parameterIDs []transportParameterID
 
@@ -179,18 +181,23 @@ func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspec
 			connID, _ := protocol.ReadConnectionID(r, int(paramLen))
 			p.RetrySourceConnectionID = &connID
 		default:
-			r.Seek(int64(paramLen), io.SeekCurrent)
+			if p.Unknown == nil {
+				p.Unknown = make(map[transportParameterID][]byte)
+			}
+			buf := make([]byte, paramLen)
+			io.ReadFull(r, buf)
+			p.Unknown[paramID] = buf
 		}
 	}
 
 	if !fromSessionTicket {
-		if sentBy == protocol.PerspectiveServer && !readOriginalDestinationConnectionID {
+		if sentBy == protocol.PerspectiveServer && !readOriginalDestinationConnectionID && !is27 {
 			return errors.New("missing original_destination_connection_id")
 		}
 		if p.MaxUDPPayloadSize == 0 {
 			p.MaxUDPPayloadSize = protocol.MaxByteCount
 		}
-		if !readInitialSourceConnectionID {
+		if !readInitialSourceConnectionID && !is27 {
 			return errors.New("missing initial_source_connection_id")
 		}
 	}
@@ -312,7 +319,7 @@ func (p *TransportParameters) readNumericTransportParameter(
 }
 
 // Marshal the transport parameters
-func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
+func (p *TransportParameters) Marshal(pers protocol.Perspective, is27 bool) []byte {
 	b := &bytes.Buffer{}
 
 	// add a greased value
@@ -381,18 +388,20 @@ func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
 	}
 	// active_connection_id_limit
 	p.marshalVarintParam(b, activeConnectionIDLimitParameterID, p.ActiveConnectionIDLimit)
-	// initial_source_connection_id
-	quicvarint.Write(b, uint64(initialSourceConnectionIDParameterID))
-	quicvarint.Write(b, uint64(p.InitialSourceConnectionID.Len()))
-	b.Write(p.InitialSourceConnectionID.Bytes())
-	// retry_source_connection_id
-	if pers == protocol.PerspectiveServer && p.RetrySourceConnectionID != nil {
-		quicvarint.Write(b, uint64(retrySourceConnectionIDParameterID))
-		quicvarint.Write(b, uint64(p.RetrySourceConnectionID.Len()))
-		b.Write(p.RetrySourceConnectionID.Bytes())
-	}
-	if p.MaxDatagramFrameSize != protocol.InvalidByteCount {
-		p.marshalVarintParam(b, maxDatagramFrameSizeParameterID, uint64(p.MaxDatagramFrameSize))
+	if !is27 {
+		// initial_source_connection_id
+		quicvarint.Write(b, uint64(initialSourceConnectionIDParameterID))
+		quicvarint.Write(b, uint64(p.InitialSourceConnectionID.Len()))
+		b.Write(p.InitialSourceConnectionID.Bytes())
+		// retry_source_connection_id
+		if pers == protocol.PerspectiveServer && p.RetrySourceConnectionID != nil {
+			quicvarint.Write(b, uint64(retrySourceConnectionIDParameterID))
+			quicvarint.Write(b, uint64(p.RetrySourceConnectionID.Len()))
+			b.Write(p.RetrySourceConnectionID.Bytes())
+		}
+		if p.MaxDatagramFrameSize != protocol.InvalidByteCount {
+			p.marshalVarintParam(b, maxDatagramFrameSizeParameterID, uint64(p.MaxDatagramFrameSize))
+		}
 	}
 	return b.Bytes()
 }
@@ -439,7 +448,7 @@ func (p *TransportParameters) UnmarshalFromSessionTicket(r *bytes.Reader) error 
 	if version != transportParameterMarshalingVersion {
 		return fmt.Errorf("unknown transport parameter marshaling version: %d", version)
 	}
-	return p.unmarshal(r, protocol.PerspectiveServer, true)
+	return p.unmarshal(r, protocol.PerspectiveServer, true, false)
 }
 
 // ValidFor0RTT checks if the transport parameters match those saved in the session ticket.

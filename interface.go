@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/internal/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/logging"
@@ -29,6 +30,7 @@ type StreamID = protocol.StreamID
 type VersionNumber = protocol.VersionNumber
 
 const (
+	VersionDraft27 = protocol.VersionDraft27
 	// VersionDraft29 is IETF QUIC draft-29
 	VersionDraft29 = protocol.VersionDraft29
 	// VersionDraft32 is IETF QUIC draft-32
@@ -37,6 +39,19 @@ const (
 	VersionDraft34 = protocol.VersionDraft34
 	// Version1 is RFC 9000
 	Version1 = protocol.Version1
+)
+
+// An ECNMode is a bitfield to configure a QUIC connection's use of ECN
+type ECNMode = ackhandler.ECNMode
+
+const (
+	DisableECN = ackhandler.DisableECN
+	// Enable ECN by sending packets marked as ECT(0)
+	UseECT0 = ackhandler.UseECT0
+	// Enable ECN by sending packets marked as ECT(1)
+	UseECT1 = ackhandler.UseECT1
+	// After successful ECN validation, deliberately send a CE-marked packet
+	TryCE = ackhandler.TryCE
 )
 
 // A Token can be used to verify the ownership of the client address.
@@ -205,6 +220,8 @@ type Session interface {
 	// Warning: This API should not be considered stable and might change soon.
 	ConnectionState() ConnectionState
 
+	LogH3Frame(ReceiveStream, interface{})
+
 	// SendMessage sends a message as a datagram.
 	// See https://datatracker.ietf.org/doc/draft-pauly-quic-datagram/.
 	SendMessage([]byte) error
@@ -301,7 +318,11 @@ type Config struct {
 	// See https://datatracker.ietf.org/doc/draft-ietf-quic-datagram/.
 	// Datagrams will only be available when both peers enable datagram support.
 	EnableDatagrams bool
-	Tracer          logging.Tracer
+	// ECNMode defines if and how this peer will attempt to use ECN on outgoing packets.
+	ECNMode ECNMode
+	Tracer  logging.Tracer
+
+	Renegotiate func(v protocol.VersionNumber)
 }
 
 // ConnectionState records basic details about a QUIC connection

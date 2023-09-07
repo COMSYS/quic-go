@@ -8,3 +8,15 @@ func IsIPv4(ip net.IP) bool {
 	// See https://stackoverflow.com/questions/22751035/golang-distinguish-ipv4-ipv6.
 	return ip.To4() != nil
 }
+
+func AddrIsIPv4(addr net.Addr) bool {
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return IsIPv4(a.IP)
+	case *net.UDPAddr:
+		return IsIPv4(a.IP)
+	case *net.IPAddr:
+		return IsIPv4(a.IP)
+	}
+	return false
+}

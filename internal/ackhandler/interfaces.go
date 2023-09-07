@@ -14,6 +14,7 @@ type Packet struct {
 	LargestAcked    protocol.PacketNumber // InvalidPacketNumber if the packet doesn't contain an ACK
 	Length          protocol.ByteCount
 	EncryptionLevel protocol.EncryptionLevel
+	TOS             protocol.TOS
 	SendTime        time.Time
 
 	IsPathMTUProbePacket bool // We don't report the loss of Path MTU probe packets to the congestion controller.
@@ -47,6 +48,8 @@ type SentPacketHandler interface {
 
 	PeekPacketNumber(protocol.EncryptionLevel) (protocol.PacketNumber, protocol.PacketNumberLen)
 	PopPacketNumber(protocol.EncryptionLevel) protocol.PacketNumber
+
+	GetTOS(isAckEliciting bool) protocol.TOS
 
 	GetLossDetectionTimeout() time.Time
 	OnLossDetectionTimeout() error

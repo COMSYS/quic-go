@@ -30,6 +30,7 @@ var (
 )
 
 const (
+	nextProtoH3Draft27 = "h3-27"
 	nextProtoH3Draft29 = "h3-29"
 	nextProtoH3Draft32 = "h3-32"
 	nextProtoH3Draft34 = "h3-34"
@@ -44,10 +45,13 @@ const (
 )
 
 func versionToALPN(v protocol.VersionNumber) string {
+	if v == protocol.VersionDraft27 {
+		return nextProtoH3Draft27
+	}
 	if v == protocol.Version1 {
 		return nextProtoH3
 	}
-	if v == protocol.VersionTLS || v == protocol.VersionDraft29 {
+	if v == protocol.VersionDraft29 {
 		return nextProtoH3Draft29
 	}
 	if v == protocol.VersionDraft32 {

@@ -45,6 +45,8 @@ func (m *MockQuicSession) AcceptStream(arg0 context.Context) (Stream, error) {
 	return ret0, ret1
 }
 
+func (m *MockQuicSession) LogH3Frame(str ReceiveStream, i interface{}) {}
+
 // AcceptStream indicates an expected call of AcceptStream.
 func (mr *MockQuicSessionMockRecorder) AcceptStream(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()

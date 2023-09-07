@@ -29,6 +29,9 @@ func validateConfig(config *Config) error {
 	if config.MaxIncomingUniStreams > 1<<60 {
 		return errors.New("invalid value for Config.MaxIncomingUniStreams")
 	}
+	if !config.ECNMode.IsValid() {
+		return errors.New("invalid value for Config.ECNMode")
+	}
 	return nil
 }
 
@@ -117,6 +120,8 @@ func populateConfig(config *Config) *Config {
 		TokenStore:                     config.TokenStore,
 		EnableDatagrams:                config.EnableDatagrams,
 		DisablePathMTUDiscovery:        config.DisablePathMTUDiscovery,
+		ECNMode:                        config.ECNMode,
 		Tracer:                         config.Tracer,
+		Renegotiate:                    config.Renegotiate,
 	}
 }

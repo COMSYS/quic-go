@@ -8,6 +8,7 @@ import (
 	"net"
 	"syscall"
 
+	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"golang.org/x/sys/windows"
 )
 
@@ -54,4 +55,6 @@ func inspectReadBuffer(c net.PacketConn) (int, error) {
 	return size, serr
 }
 
-func (i *packetInfo) OOB() []byte { return nil }
+func (i *packetInfo) OOB() []byte             { return nil }
+func tosOOB(t protocol.TOS, ipv4 bool) []byte { return nil }
+func mergeOOB(oob ...[]byte) []byte           { return nil }

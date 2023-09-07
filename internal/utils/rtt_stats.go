@@ -12,7 +12,7 @@ const (
 	rttBeta       = 0.25
 	oneMinusBeta  = 1 - rttBeta
 	// The default RTT used before an RTT sample is taken.
-	defaultInitialRTT = 100 * time.Millisecond
+	defaultInitialRTT = 500 * time.Millisecond // quic-go had 100ms, RC9002 says it SHOULD be 333ms, so the first PTO is 1s, to also achieve 1s we use 500ms
 )
 
 // RTTStats provides round-trip statistics

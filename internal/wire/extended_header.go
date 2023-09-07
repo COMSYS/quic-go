@@ -172,6 +172,10 @@ func (h *ExtendedHeader) writeShortHeader(b *bytes.Buffer, _ protocol.VersionNum
 		typeByte |= byte(1 << 2)
 	}
 
+	if h.SpinBit {
+		typeByte |= 0x20
+	}
+
 	b.WriteByte(typeByte)
 	b.Write(h.DestConnectionID.Bytes())
 	return h.writePacketNumber(b)

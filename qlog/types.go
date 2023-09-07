@@ -53,6 +53,7 @@ const (
 	categoryTransport
 	categorySecurity
 	categoryRecovery
+	categoryH3
 )
 
 func (c category) String() string {
@@ -65,6 +66,8 @@ func (c category) String() string {
 		return "security"
 	case categoryRecovery:
 		return "recovery"
+	case categoryH3:
+		return "h3"
 	default:
 		return "unknown category"
 	}
@@ -317,4 +320,38 @@ func (s congestionState) String() string {
 	default:
 		return "unknown congestion state"
 	}
+}
+
+type ecnValidationResult logging.ECNValidationResult
+
+func (r ecnValidationResult) IsSuccess() bool {
+	return logging.ECNValidationResult(r) == logging.ECNValidationSuccess
+}
+
+func (r ecnValidationResult) Reason() string {
+	switch logging.ECNValidationResult(r) {
+	case logging.ECNValidationMissingCounters:
+		return "missing_counters"
+	case logging.ECNValidationDecreasingECT0:
+		return "decreasing_ect0_counter"
+	case logging.ECNValidationDecreasingECT1:
+		return "decreasing_ect1_counter"
+	case logging.ECNValidationDecreasingCE:
+		return "decreasing_ce_counter"
+	case logging.ECNValidationIllegalECT0:
+		return "illegal_remarking_ect0"
+	case logging.ECNValidationIllegalECT1:
+		return "illegal_remarking_ect1"
+	case logging.ECNValidationMissingECT0:
+		return "missing_mark_ect0"
+	case logging.ECNValidationMissingECT1:
+		return "missing_mark_ect1"
+	case logging.ECNValidationMissingCE:
+		return "missing_mark_ce"
+	case logging.ECNValidationAllCE:
+		return "all_sent_ce"
+	case logging.ECNValidationAllLost:
+		return "all_sent_lost"
+	}
+	return logging.ECNValidationResult(r).String()
 }

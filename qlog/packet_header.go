@@ -47,6 +47,8 @@ type packetHeader struct {
 	SrcConnectionID  logging.ConnectionID
 	DestConnectionID logging.ConnectionID
 
+	SpinBit bool
+
 	Token *token
 }
 
@@ -56,6 +58,7 @@ func transformHeader(hdr *wire.Header) *packetHeader {
 		SrcConnectionID:  hdr.SrcConnectionID,
 		DestConnectionID: hdr.DestConnectionID,
 		Version:          hdr.Version,
+		SpinBit:          hdr.SpinBit,
 	}
 	if len(hdr.Token) > 0 {
 		h.Token = &token{Raw: hdr.Token}
@@ -93,6 +96,9 @@ func (h packetHeader) MarshalJSONObject(enc *gojay.Encoder) {
 	}
 	if h.Token != nil {
 		enc.ObjectKey("token", h.Token)
+	}
+	if h.PacketType == logging.PacketType1RTT {
+		enc.BoolKey("spin_bit", h.SpinBit)
 	}
 }
 

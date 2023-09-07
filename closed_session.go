@@ -73,8 +73,8 @@ func (s *closedLocalSession) handlePacketImpl(_ *receivedPacket) {
 			return
 		}
 	}
-	s.logger.Debugf("Received %d packets after sending CONNECTION_CLOSE. Retransmitting.", s.counter)
-	if err := s.conn.Write(s.connClosePacket); err != nil {
+	s.logger.Debugf("Received %d packets after sending CONNECTION_CLOSE. Retransmitting (without ECN).", s.counter)
+	if err := s.conn.Write(s.connClosePacket, protocol.TOSDefault); err != nil {
 		s.logger.Debugf("Error retransmitting CONNECTION_CLOSE: %s", err)
 	}
 }

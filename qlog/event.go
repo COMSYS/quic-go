@@ -1,6 +1,7 @@
 package qlog
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -334,7 +335,7 @@ type eventKeyUpdated struct {
 	Trigger    keyUpdateTrigger
 	KeyType    keyType
 	Generation protocol.KeyPhase
-	// we don't log the keys here, so we don't need `old` and `new`.
+	New        []byte
 }
 
 func (e eventKeyUpdated) Category() category { return categorySecurity }
@@ -344,6 +345,7 @@ func (e eventKeyUpdated) IsNil() bool        { return false }
 func (e eventKeyUpdated) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.StringKey("trigger", e.Trigger.String())
 	enc.StringKey("key_type", e.KeyType.String())
+	enc.StringKey("new", hex.EncodeToString(e.New))
 	if e.KeyType == keyTypeClient1RTT || e.KeyType == keyTypeServer1RTT {
 		enc.Uint64Key("generation", uint64(e.Generation))
 	}
@@ -367,6 +369,8 @@ func (e eventKeyRetired) MarshalJSONObject(enc *gojay.Encoder) {
 		enc.Uint64Key("generation", uint64(e.Generation))
 	}
 }
+
+type eventTransportParametersUnknown map[string][]byte
 
 type eventTransportParameters struct {
 	Restore bool
@@ -395,6 +399,22 @@ type eventTransportParameters struct {
 	PreferredAddress *preferredAddress
 
 	MaxDatagramFrameSize protocol.ByteCount
+
+	Unknown eventTransportParametersUnknown
+}
+
+var _ gojay.MarshalerJSONObject = &eventTransportParametersUnknown{}
+
+// Implementing Marshaler
+func (e eventTransportParametersUnknown) MarshalJSONObject(enc *gojay.Encoder) {
+	for k, v := range e {
+		val := hex.EncodeToString(v)
+		enc.StringKey(k, val)
+	}
+}
+
+func (e eventTransportParametersUnknown) IsNil() bool {
+	return e == nil
 }
 
 func (e eventTransportParameters) Category() category { return categoryTransport }
@@ -439,6 +459,9 @@ func (e eventTransportParameters) MarshalJSONObject(enc *gojay.Encoder) {
 	}
 	if e.MaxDatagramFrameSize != protocol.InvalidByteCount {
 		enc.Int64Key("max_datagram_frame_size", int64(e.MaxDatagramFrameSize))
+	}
+	if e.Unknown != nil {
+		enc.ObjectKey("unknown", e.Unknown)
 	}
 }
 
@@ -515,6 +538,22 @@ func (e eventCongestionStateUpdated) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.StringKey("new", e.state.String())
 }
 
+type eventECNValidated struct {
+	result ecnValidationResult
+}
+
+func (e eventECNValidated) Category() category { return categoryTransport }
+func (e eventECNValidated) Name() string       { return "ecn_validated" }
+func (e eventECNValidated) IsNil() bool        { return false }
+
+func (e eventECNValidated) MarshalJSONObject(enc *gojay.Encoder) {
+	success := e.result.IsSuccess()
+	enc.BoolKey("success", success)
+	if !success {
+		enc.StringKey("reason", e.result.Reason())
+	}
+}
+
 type eventGeneric struct {
 	name string
 	msg  string
@@ -526,4 +565,17 @@ func (e eventGeneric) IsNil() bool        { return false }
 
 func (e eventGeneric) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.StringKey("details", e.msg)
+}
+
+type h3frames struct {
+	s logging.StreamID
+	i interface{}
+}
+
+func (e h3frames) Category() category { return categoryH3 }
+func (e h3frames) Name() string       { return "h3_frames" }
+func (e h3frames) IsNil() bool        { return false }
+
+func (e h3frames) MarshalJSONObject(enc *gojay.Encoder) {
+
 }

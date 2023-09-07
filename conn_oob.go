@@ -18,8 +18,6 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
-const ecnMask uint8 = 0x3
-
 func inspectReadBuffer(c interface{}) (int, error) {
 	conn, ok := c.(interface {
 		SyscallConn() (syscall.RawConn, error)
@@ -114,14 +112,13 @@ func (c *oobConn) ReadPacket() (*receivedPacket, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ecn protocol.ECN
 	var destIP net.IP
 	var ifIndex uint32
 	for _, ctrlMsg := range ctrlMsgs {
 		if ctrlMsg.Header.Level == unix.IPPROTO_IP {
 			switch ctrlMsg.Header.Type {
 			case msgTypeIPTOS:
-				ecn = protocol.ECN(ctrlMsg.Data[0] & ecnMask)
+				buffer.TOS = protocol.TOS(ctrlMsg.Data[0])
 			case msgTypeIPv4PKTINFO:
 				// struct in_pktinfo {
 				// 	unsigned int   ipi_ifindex;  /* Interface index */
@@ -141,7 +138,7 @@ func (c *oobConn) ReadPacket() (*receivedPacket, error) {
 		if ctrlMsg.Header.Level == unix.IPPROTO_IPV6 {
 			switch ctrlMsg.Header.Type {
 			case unix.IPV6_TCLASS:
-				ecn = protocol.ECN(ctrlMsg.Data[0] & ecnMask)
+				buffer.TOS = protocol.TOS(ctrlMsg.Data[0])
 			case msgTypeIPv6PKTINFO:
 				// struct in6_pktinfo {
 				// 	struct in6_addr ipi6_addr;    /* src/dst IPv6 address */
@@ -165,7 +162,6 @@ func (c *oobConn) ReadPacket() (*receivedPacket, error) {
 		remoteAddr: addr,
 		rcvTime:    time.Now(),
 		data:       buffer.Data[:n],
-		ecn:        ecn,
 		info:       info,
 		buffer:     buffer,
 	}, nil
@@ -190,13 +186,13 @@ func (info *packetInfo) OOB() []byte {
 		if runtime.GOOS == "freebsd" {
 			msgLen = 4
 		}
-		cmsglen := cmsgLen(msgLen)
+		cmsglen := unix.CmsgLen(msgLen)
 		oob := make([]byte, cmsglen)
-		cmsg := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[0]))
-		cmsg.Level = syscall.IPPROTO_TCP
+		cmsg := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+		cmsg.Level = unix.IPPROTO_IP
 		cmsg.Type = msgTypeIPv4PKTINFO
 		cmsg.SetLen(cmsglen)
-		off := cmsgLen(0)
+		off := unix.CmsgLen(0)
 		if runtime.GOOS != "freebsd" {
 			// FreeBSD does not support in_pktinfo, just an in_addr is sent
 			binary.LittleEndian.PutUint32(oob[off:], info.ifIndex)
@@ -210,13 +206,13 @@ func (info *packetInfo) OOB() []byte {
 		// 	unsigned int    ipi6_ifindex; /* send/recv interface index */
 		// };
 		const msgLen = 20
-		cmsglen := cmsgLen(msgLen)
+		cmsglen := unix.CmsgLen(msgLen)
 		oob := make([]byte, cmsglen)
-		cmsg := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[0]))
-		cmsg.Level = syscall.IPPROTO_IPV6
+		cmsg := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+		cmsg.Level = unix.IPPROTO_IPV6
 		cmsg.Type = msgTypeIPv6PKTINFO
 		cmsg.SetLen(cmsglen)
-		off := cmsgLen(0)
+		off := unix.CmsgLen(0)
 		off += copy(oob[off:], info.addr)
 		binary.LittleEndian.PutUint32(oob[off:], info.ifIndex)
 		return oob
@@ -224,12 +220,61 @@ func (info *packetInfo) OOB() []byte {
 	return nil
 }
 
-func cmsgLen(datalen int) int {
-	return cmsgAlign(syscall.SizeofCmsghdr) + datalen
+// Specifying TOS/traffic class via ancillary data:
+// * IPv4 (Linux): https://lore.kernel.org/all/cover.1379944641.git.ffusco@redhat.com/T/#u
+// * IPv4 (FreeBSD): https://github.com/freebsd/freebsd-src/blob/release/10.0.0/sys/netinet/udp_usrreq.c#L1021-L1027
+// * IPv4 (Darwin): ???
+// * IPv6: RFC 3542 section 6.5
+// See also https://github.com/quicwg/base-drafts/wiki/ECN-in-QUIC#ecn-support-in-various-os-stacks
+func tosOOB(t protocol.TOS, ipv4 bool) []byte {
+	if t == protocol.TOSDefault {
+		return nil
+	}
+	useByte := runtime.GOOS == "freebsd" && ipv4
+	msgLen := 4
+	if useByte {
+		msgLen = 1
+	}
+	cmsglen := unix.CmsgLen(msgLen)
+	oob := make([]byte, cmsglen)
+	cmsg := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+	if ipv4 {
+		cmsg.Level = unix.IPPROTO_IP
+		cmsg.Type = unix.IP_TOS
+	} else {
+		cmsg.Level = unix.IPPROTO_IPV6
+		cmsg.Type = unix.IPV6_TCLASS
+	}
+	cmsg.SetLen(cmsglen)
+	off := unix.CmsgLen(0)
+	if useByte {
+		oob[off] = byte(t)
+	} else {
+		binary.LittleEndian.PutUint32(oob[off:], uint32(t))
+	}
+	return oob
 }
 
-func cmsgAlign(salen int) int {
-	const sizeOfPtr = 0x8
-	salign := sizeOfPtr
-	return (salen + salign - 1) & ^(salign - 1)
+func mergeOOB(oob ...[]byte) []byte {
+	off := 0
+	for _, buf := range oob {
+		if buf == nil {
+			continue
+		}
+		off += unix.CmsgSpace(len(buf) - unix.CmsgLen(0)) // == CMSG_ALIGN(cmsg->cmsg_len)
+	}
+	if off == 0 {
+		return nil
+	}
+
+	res := make([]byte, off)
+	off = 0
+	for _, buf := range oob {
+		if buf == nil {
+			continue
+		}
+		copy(res[off:], buf)
+		off += unix.CmsgSpace(len(buf) - unix.CmsgLen(0)) // == CMSG_ALIGN(cmsg->cmsg_len)
+	}
+	return res
 }

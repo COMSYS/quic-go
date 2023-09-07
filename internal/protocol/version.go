@@ -18,9 +18,10 @@ const (
 
 // The version numbers, making grepping easier
 const (
-	VersionTLS      VersionNumber = 0x51474fff
+	VersionTLS      VersionNumber = 0xff00001d         // draft-29
 	VersionWhatever VersionNumber = math.MaxUint32 - 1 // for when the version doesn't matter
 	VersionUnknown  VersionNumber = math.MaxUint32
+	VersionDraft27  VersionNumber = 0xff00001b
 	VersionDraft29  VersionNumber = 0xff00001d
 	VersionDraft32  VersionNumber = 0xff000020
 	VersionDraft34  VersionNumber = 0xff000022
@@ -29,7 +30,7 @@ const (
 
 // SupportedVersions lists the versions that the server supports
 // must be in sorted descending order
-var SupportedVersions = []VersionNumber{VersionTLS}
+var SupportedVersions = []VersionNumber{Version1, VersionDraft34, VersionDraft32, VersionDraft29, VersionDraft27}
 
 // IsValidVersion says if the version is known to quic-go
 func IsValidVersion(v VersionNumber) bool {
@@ -48,6 +49,8 @@ func (vn VersionNumber) String() string {
 		return "whatever"
 	case VersionUnknown:
 		return "unknown"
+	case VersionDraft27:
+		return "draft-27"
 	case VersionDraft29:
 		return "draft-29"
 	case VersionDraft32:
@@ -75,7 +78,7 @@ func (vn VersionNumber) toGQUICVersion() int {
 // UseRetireBugBackwardsCompatibilityMode says if it is necessary to use the backwards compatilibity mode.
 // This is only the case if it 1. is enabled and 2. draft-29 is used.
 func UseRetireBugBackwardsCompatibilityMode(enabled bool, v VersionNumber) bool {
-	return enabled && v == VersionDraft29
+	return enabled && (v == VersionDraft29 || v == VersionDraft27)
 }
 
 // IsSupportedVersion returns true if the server supports this version

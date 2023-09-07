@@ -233,6 +233,13 @@ func (w *requestWriter) encodeHeaders(req *http.Request, addGzipHeader bool, tra
 	// trace := httptrace.ContextClientTrace(req.Context())
 	// traceHeaders := traceHasWroteHeaderField(trace)
 
+	//Header := make(http.Header)
+
+	enumerateHeaders(func(name, value string) {
+		//log.Printf("Header set: %s: %s\n", name, value)
+		//Header.Add(name, value)
+	})
+
 	// Header list size is ok. Write the headers.
 	enumerateHeaders(func(name, value string) {
 		name = strings.ToLower(name)
@@ -241,6 +248,8 @@ func (w *requestWriter) encodeHeaders(req *http.Request, addGzipHeader bool, tra
 		// 	traceWroteHeaderField(trace, name, value)
 		// }
 	})
+
+	//req.Header = Header
 
 	return nil
 }

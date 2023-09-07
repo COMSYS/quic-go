@@ -114,8 +114,10 @@ func dialAddrContext(
 	if err != nil {
 		return nil, err
 	}
-	return dialContext(ctx, udpConn, udpAddr, addr, tlsConf, config, use0RTT, true)
+	return dialContext(ctx, udpConn, udpAddr, addr, tlsConf, config, use0RTT, true, false)
 }
+
+var DialContextPublic = dialContext
 
 // Dial establishes a new QUIC connection to a server using a net.PacketConn. If
 // the PacketConn satisfies the OOBCapablePacketConn interface (as a net.UDPConn
@@ -132,7 +134,7 @@ func Dial(
 	tlsConf *tls.Config,
 	config *Config,
 ) (Session, error) {
-	return dialContext(context.Background(), pconn, remoteAddr, host, tlsConf, config, false, false)
+	return dialContext(context.Background(), pconn, remoteAddr, host, tlsConf, config, false, false, false)
 }
 
 // DialEarly establishes a new 0-RTT QUIC connection to a server using a net.PacketConn.
@@ -160,7 +162,7 @@ func DialEarlyContext(
 	tlsConf *tls.Config,
 	config *Config,
 ) (EarlySession, error) {
-	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, true, false)
+	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, true, false, false)
 }
 
 // DialContext establishes a new QUIC connection to a server using a net.PacketConn using the provided context.
@@ -173,7 +175,7 @@ func DialContext(
 	tlsConf *tls.Config,
 	config *Config,
 ) (Session, error) {
-	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, false, false)
+	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, false, false, false)
 }
 
 func dialContext(
@@ -185,6 +187,7 @@ func dialContext(
 	config *Config,
 	use0RTT bool,
 	createdPacketConn bool,
+	isConnected bool,
 ) (quicSession, error) {
 	if tlsConf == nil {
 		return nil, errors.New("quic: tls.Config not set")
@@ -197,7 +200,7 @@ func dialContext(
 	if err != nil {
 		return nil, err
 	}
-	c, err := newClient(pconn, remoteAddr, config, tlsConf, host, use0RTT, createdPacketConn)
+	c, err := newClient(pconn, remoteAddr, config, tlsConf, host, use0RTT, createdPacketConn, isConnected)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +231,7 @@ func newClient(
 	host string,
 	use0RTT bool,
 	createdPacketConn bool,
+	isConnected bool,
 ) (*client, error) {
 	if tlsConf == nil {
 		tlsConf = &tls.Config{}
@@ -262,10 +266,20 @@ func newClient(
 	if err != nil {
 		return nil, err
 	}
+	var sc sendConn
+	if isConnected {
+		sc = newSendPconnConnected(pconn, remoteAddr)
+	} else {
+		wrapped, err := wrapConn(pconn)
+		if err != nil {
+			return nil, err
+		}
+		sc = newSendConn(wrapped, remoteAddr, nil)
+	}
 	c := &client{
 		srcConnID:         srcConnID,
 		destConnID:        destConnID,
-		conn:              newSendPconn(pconn, remoteAddr),
+		conn:              sc,
 		createdPacketConn: createdPacketConn,
 		use0RTT:           use0RTT,
 		tlsConf:           tlsConf,
@@ -323,6 +337,9 @@ func (c *client) dial(ctx context.Context) error {
 			c.initialPacketNumber = recreateErr.nextPacketNumber
 			c.version = recreateErr.nextVersion
 			c.hasNegotiatedVersion = true
+			if c.config.Renegotiate != nil {
+				c.config.Renegotiate(c.version)
+			}
 			return c.dial(ctx)
 		}
 		return err

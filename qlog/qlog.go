@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
@@ -254,7 +255,8 @@ func (t *connectionTracer) toTransportParameters(tp *wire.TransportParameters) *
 			StatelessResetToken: tp.PreferredAddress.StatelessResetToken,
 		}
 	}
-	return &eventTransportParameters{
+
+	etp := &eventTransportParameters{
 		OriginalDestinationConnectionID: tp.OriginalDestinationConnectionID,
 		InitialSourceConnectionID:       tp.InitialSourceConnectionID,
 		RetrySourceConnectionID:         tp.RetrySourceConnectionID,
@@ -274,6 +276,15 @@ func (t *connectionTracer) toTransportParameters(tp *wire.TransportParameters) *
 		PreferredAddress:                pa,
 		MaxDatagramFrameSize:            tp.MaxDatagramFrameSize,
 	}
+
+	if tp.Unknown != nil {
+		etp.Unknown = make(eventTransportParametersUnknown)
+		for id, v := range tp.Unknown {
+			etp.Unknown[strconv.FormatUint(uint64(id), 16)] = v
+		}
+	}
+
+	return etp
 }
 
 func (t *connectionTracer) SentPacket(hdr *wire.ExtendedHeader, packetSize logging.ByteCount, ack *logging.AckFrame, frames []logging.Frame) {
@@ -383,6 +394,12 @@ func (t *connectionTracer) LostPacket(encLevel protocol.EncryptionLevel, pn prot
 	t.mutex.Unlock()
 }
 
+func (t *connectionTracer) ValidatedECN(result logging.ECNValidationResult) {
+	t.mutex.Lock()
+	t.recordEvent(time.Now(), &eventECNValidated{result: ecnValidationResult(result)})
+	t.mutex.Unlock()
+}
+
 func (t *connectionTracer) UpdatedCongestionState(state logging.CongestionState) {
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventCongestionStateUpdated{state: congestionState(state)})
@@ -395,31 +412,37 @@ func (t *connectionTracer) UpdatedPTOCount(value uint32) {
 	t.mutex.Unlock()
 }
 
-func (t *connectionTracer) UpdatedKeyFromTLS(encLevel protocol.EncryptionLevel, pers protocol.Perspective) {
+func (t *connectionTracer) UpdatedKeyFromTLS(encLevel protocol.EncryptionLevel, pers protocol.Perspective, key []byte) {
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventKeyUpdated{
 		Trigger: keyUpdateTLS,
 		KeyType: encLevelToKeyType(encLevel, pers),
+		New:     key,
 	})
 	t.mutex.Unlock()
 }
 
-func (t *connectionTracer) UpdatedKey(generation protocol.KeyPhase, remote bool) {
+func (t *connectionTracer) UpdatedKey(generation protocol.KeyPhase, remote bool, rcvKey, sendKey []byte) {
 	trigger := keyUpdateLocal
 	if remote {
 		trigger = keyUpdateRemote
 	}
 	t.mutex.Lock()
+	if t.perspective == logging.PerspectiveServer {
+		rcvKey, sendKey = sendKey, rcvKey
+	}
 	now := time.Now()
 	t.recordEvent(now, &eventKeyUpdated{
 		Trigger:    trigger,
 		KeyType:    keyTypeClient1RTT,
 		Generation: generation,
+		New:        sendKey,
 	})
 	t.recordEvent(now, &eventKeyUpdated{
 		Trigger:    trigger,
 		KeyType:    keyTypeServer1RTT,
 		Generation: generation,
+		New:        rcvKey,
 	})
 	t.mutex.Unlock()
 }
@@ -483,4 +506,12 @@ func (t *connectionTracer) Debug(name, msg string) {
 		msg:  msg,
 	})
 	t.mutex.Unlock()
+}
+
+func (t *connectionTracer) H3Frame(s protocol.StreamID, i interface{}) {
+
+}
+
+func (t *connectionTracer) H3SentHeader() {
+
 }

@@ -158,21 +158,39 @@ func (m *connTracerMultiplexer) LostPacket(encLevel EncryptionLevel, pn PacketNu
 	}
 }
 
+func (m *connTracerMultiplexer) ValidatedECN(result ECNValidationResult) {
+	for _, t := range m.tracers {
+		t.ValidatedECN(result)
+	}
+}
+
 func (m *connTracerMultiplexer) UpdatedPTOCount(value uint32) {
 	for _, t := range m.tracers {
 		t.UpdatedPTOCount(value)
 	}
 }
 
-func (m *connTracerMultiplexer) UpdatedKeyFromTLS(encLevel EncryptionLevel, perspective Perspective) {
+func (m *connTracerMultiplexer) UpdatedKeyFromTLS(encLevel EncryptionLevel, perspective Perspective, key []byte) {
 	for _, t := range m.tracers {
-		t.UpdatedKeyFromTLS(encLevel, perspective)
+		t.UpdatedKeyFromTLS(encLevel, perspective, key)
 	}
 }
 
-func (m *connTracerMultiplexer) UpdatedKey(generation KeyPhase, remote bool) {
+func (m *connTracerMultiplexer) H3SentHeader() {
 	for _, t := range m.tracers {
-		t.UpdatedKey(generation, remote)
+		t.H3SentHeader()
+	}
+}
+
+func (m *connTracerMultiplexer) H3Frame(s StreamID, i interface{}) {
+	for _, t := range m.tracers {
+		t.H3Frame(s, i)
+	}
+}
+
+func (m *connTracerMultiplexer) UpdatedKey(generation KeyPhase, remote bool, rcvKey, sendKey []byte) {
+	for _, t := range m.tracers {
+		t.UpdatedKey(generation, remote, rcvKey, sendKey)
 	}
 }
 

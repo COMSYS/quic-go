@@ -28,6 +28,8 @@ type packer interface {
 
 	HandleTransportParameters(*wire.TransportParameters)
 	SetToken([]byte)
+
+	SetLatestSpinBit(spinBit bool)
 }
 
 type sealer interface {
@@ -51,6 +53,7 @@ type packetContents struct {
 	frames []ackhandler.Frame
 
 	length protocol.ByteCount
+	tos    protocol.TOS
 
 	isMTUProbePacket bool
 }
@@ -106,6 +109,7 @@ func (p *packetContents) ToAckHandlerPacket(now time.Time, q *retransmissionQueu
 		Frames:               p.frames,
 		Length:               p.length,
 		EncryptionLevel:      encLevel,
+		TOS:                  p.tos,
 		SendTime:             now,
 		IsPathMTUProbePacket: p.isMTUProbePacket,
 	}
@@ -128,6 +132,10 @@ func getMaxPacketSize(addr net.Addr) protocol.ByteCount {
 type packetNumberManager interface {
 	PeekPacketNumber(protocol.EncryptionLevel) (protocol.PacketNumber, protocol.PacketNumberLen)
 	PopPacketNumber(protocol.EncryptionLevel) protocol.PacketNumber
+}
+
+type tosManager interface {
+	GetTOS(isAckEliciting bool) protocol.TOS
 }
 
 type sealingManager interface {
@@ -155,12 +163,15 @@ type packetPacker struct {
 	version     protocol.VersionNumber
 	cryptoSetup sealingManager
 
+	spinBit bool
+
 	initialStream   cryptoStream
 	handshakeStream cryptoStream
 
 	token []byte
 
 	pnManager           packetNumberManager
+	tosManager          tosManager
 	framer              frameSource
 	acks                ackFrameSource
 	datagramQueue       *datagramQueue
@@ -178,6 +189,7 @@ func newPacketPacker(
 	initialStream cryptoStream,
 	handshakeStream cryptoStream,
 	packetNumberManager packetNumberManager,
+	tosManager tosManager,
 	retransmissionQueue *retransmissionQueue,
 	remoteAddr net.Addr, // only used for determining the max packet size
 	cryptoSetup sealingManager,
@@ -200,7 +212,9 @@ func newPacketPacker(
 		framer:              framer,
 		acks:                acks,
 		pnManager:           packetNumberManager,
+		tosManager:          tosManager,
 		maxPacketSize:       getMaxPacketSize(remoteAddr),
+		spinBit:             false,
 	}
 }
 
@@ -290,6 +304,7 @@ func (p *packetPacker) packConnectionClose(
 	}
 	contents := make([]*packetContents, 0, numPackets)
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(false)
 	for i, encLevel := range encLevels {
 		if sealers[i] == nil {
 			continue
@@ -349,7 +364,7 @@ func (p *packetPacker) MaybePackAckPacket(handshakeConfirmed bool) (*packedPacke
 	if err != nil {
 		return nil, err
 	}
-	return p.writeSinglePacket(hdr, payload, encLevel, sealer)
+	return p.writeSinglePacket(hdr, payload, encLevel, sealer, false)
 }
 
 // size is the expected size of the packet, if no padding was applied.
@@ -375,6 +390,7 @@ func (p *packetPacker) PackCoalescedPacket() (*coalescedPacket, error) {
 	var initialHdr, handshakeHdr, appDataHdr *wire.ExtendedHeader
 	var initialPayload, handshakePayload, appDataPayload *payload
 	var numPackets int
+	isAckEliciting := false
 	// Try packing an Initial packet.
 	initialSealer, err := p.cryptoSetup.GetInitialSealer()
 	if err != nil && err != handshake.ErrKeysDropped {
@@ -386,6 +402,7 @@ func (p *packetPacker) PackCoalescedPacket() (*coalescedPacket, error) {
 		if initialPayload != nil {
 			size += p.packetLength(initialHdr, initialPayload) + protocol.ByteCount(initialSealer.Overhead())
 			numPackets++
+			isAckEliciting = isAckEliciting || len(initialPayload.frames) != 0
 		}
 	}
 
@@ -403,6 +420,7 @@ func (p *packetPacker) PackCoalescedPacket() (*coalescedPacket, error) {
 				s := p.packetLength(handshakeHdr, handshakePayload) + protocol.ByteCount(handshakeSealer.Overhead())
 				size += s
 				numPackets++
+				isAckEliciting = isAckEliciting || len(handshakePayload.frames) != 0
 			}
 		}
 	}
@@ -423,6 +441,7 @@ func (p *packetPacker) PackCoalescedPacket() (*coalescedPacket, error) {
 			if appDataPayload != nil {
 				size += p.packetLength(appDataHdr, appDataPayload) + protocol.ByteCount(appDataSealer.Overhead())
 				numPackets++
+				isAckEliciting = isAckEliciting || len(appDataPayload.frames) != 0
 			}
 		}
 	}
@@ -432,6 +451,7 @@ func (p *packetPacker) PackCoalescedPacket() (*coalescedPacket, error) {
 	}
 
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(isAckEliciting)
 	packet := &coalescedPacket{
 		buffer:  buffer,
 		packets: make([]*packetContents, 0, numPackets),
@@ -469,6 +489,7 @@ func (p *packetPacker) PackPacket() (*packedPacket, error) {
 		return nil, nil
 	}
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(len(payload.frames) != 0)
 	encLevel := protocol.Encryption1RTT
 	if hdr.IsLongHeader {
 		encLevel = protocol.Encryption0RTT
@@ -689,6 +710,7 @@ func (p *packetPacker) MaybePackProbePacket(encLevel protocol.EncryptionLevel) (
 		padding = p.initialPaddingLen(payload.frames, size)
 	}
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(true)
 	cont, err := p.appendPacket(buffer, hdr, payload, padding, encLevel, sealer, false)
 	if err != nil {
 		return nil, err
@@ -705,6 +727,7 @@ func (p *packetPacker) PackMTUProbePacket(ping ackhandler.Frame, size protocol.B
 		length: ping.Length(p.version),
 	}
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(true)
 	sealer, err := p.cryptoSetup.Get1RTTSealer()
 	if err != nil {
 		return nil, err
@@ -764,6 +787,7 @@ func (p *packetPacker) getShortHeader(kp protocol.KeyPhaseBit) *wire.ExtendedHea
 	hdr.PacketNumberLen = pnLen
 	hdr.DestConnectionID = p.getDestConnID()
 	hdr.KeyPhase = kp
+	hdr.SpinBit = p.spinBit
 	return hdr
 }
 
@@ -797,8 +821,10 @@ func (p *packetPacker) writeSinglePacket(
 	payload *payload,
 	encLevel protocol.EncryptionLevel,
 	sealer sealer,
+	isAckEliciting bool,
 ) (*packedPacket, error) {
 	buffer := getPacketBuffer()
+	buffer.TOS = p.tosManager.GetTOS(isAckEliciting)
 	var paddingLen protocol.ByteCount
 	if encLevel == protocol.EncryptionInitial {
 		paddingLen = p.initialPaddingLen(payload.frames, hdr.GetLength(p.version)+payload.length+protocol.ByteCount(sealer.Overhead()))
@@ -873,6 +899,7 @@ func (p *packetPacker) appendPacket(buffer *packetBuffer, header *wire.ExtendedH
 		ack:    payload.ack,
 		frames: payload.frames,
 		length: buffer.Len() - hdrOffset,
+		tos:    buffer.TOS,
 	}, nil
 }
 
@@ -891,4 +918,8 @@ func (p *packetPacker) HandleTransportParameters(params *wire.TransportParameter
 	if params.MaxUDPPayloadSize != 0 {
 		p.maxPacketSize = utils.MinByteCount(p.maxPacketSize, params.MaxUDPPayloadSize)
 	}
+}
+
+func (p *packetPacker) SetLatestSpinBit(spinBit bool) {
+	p.spinBit = !spinBit
 }

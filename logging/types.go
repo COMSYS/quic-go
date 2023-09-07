@@ -92,3 +92,56 @@ const (
 	// CongestionStateApplicationLimited means that the congestion controller is application limited
 	CongestionStateApplicationLimited
 )
+
+type ECNValidationResult uint8
+
+const (
+	// Initial ECN validation succeeded
+	ECNValidationSuccess ECNValidationResult = iota
+	// ECN validation failed because an ACK lacked required ECN counters
+	ECNValidationMissingCounters
+	// ECN validation failed because an ECN counter decreased
+	ECNValidationDecreasingECT0
+	ECNValidationDecreasingECT1
+	ECNValidationDecreasingCE
+	// ECN validation failed because sent packets were illegally remarked in the network
+	ECNValidationMissingECT0 // from ECT0 to Not-ECT
+	ECNValidationMissingECT1 // from ECT1 to Not-ECT
+	ECNValidationIllegalECT0 // from any to ECT0
+	ECNValidationIllegalECT1 // from any to ECT1
+	ECNValidationMissingCE   // from CE to Not-ECT or ECT0
+	// Initial ECN validation failed because all sent packets were reported as CE
+	ECNValidationAllCE
+	// Initial ECN validation failed because all sent packets were declared lost
+	ECNValidationAllLost
+)
+
+func (r ECNValidationResult) String() string {
+	switch r {
+	case ECNValidationSuccess:
+		return "success"
+	case ECNValidationMissingCounters:
+		return "failed (missing ECN counters in ACK)"
+	case ECNValidationDecreasingECT0:
+		return "failed (ECT0 counter decreased)"
+	case ECNValidationDecreasingECT1:
+		return "failed (ECT1 counter decreased)"
+	case ECNValidationDecreasingCE:
+		return "failed (CE counter decreased)"
+	case ECNValidationIllegalECT0:
+		return "failed (sent packets were illegally remarked to ECT0)"
+	case ECNValidationIllegalECT1:
+		return "failed (sent packets were illegally remarked to ECT1)"
+	case ECNValidationMissingECT0:
+		return "failed (sent packets were illegally remarked from ECT0)"
+	case ECNValidationMissingECT1:
+		return "failed (sent packets were illegally remarked from ECT1)"
+	case ECNValidationMissingCE:
+		return "failed (sent packets were illegally remarked from CE)"
+	case ECNValidationAllCE:
+		return "failed (all sent packets were reported as CE)"
+	case ECNValidationAllLost:
+		return "failed (all sent packets were declared lost)"
+	}
+	return "invalid ECNValidationResult value"
+}

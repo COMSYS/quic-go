@@ -31,7 +31,7 @@ const (
 var defaultQuicConfig = &quic.Config{
 	MaxIncomingStreams: -1, // don't allow the server to create bidirectional streams
 	KeepAlive:          true,
-	Versions:           []protocol.VersionNumber{protocol.VersionTLS},
+	Versions:           protocol.SupportedVersions,
 }
 
 var dialAddr = quic.DialAddrEarly
@@ -73,11 +73,12 @@ func newClient(
 		quicConfig = defaultQuicConfig.Clone()
 	} else if len(quicConfig.Versions) == 0 {
 		quicConfig = quicConfig.Clone()
-		quicConfig.Versions = []quic.VersionNumber{defaultQuicConfig.Versions[0]}
+		quicConfig.Versions = defaultQuicConfig.Versions
 	}
+	/*
 	if len(quicConfig.Versions) != 1 {
 		return nil, errors.New("can only use a single QUIC version for dialing a HTTP/3 connection")
-	}
+	}*/
 	quicConfig.MaxIncomingStreams = -1 // don't allow any bidirectional streams
 	quicConfig.EnableDatagrams = opts.EnableDatagram
 	logger := utils.DefaultLogger.WithPrefix("h3 client")
@@ -89,6 +90,10 @@ func newClient(
 	}
 	// Replace existing ALPNs by H3
 	tlsConf.NextProtos = []string{versionToALPN(quicConfig.Versions[0])}
+
+	quicConfig.Renegotiate = func(v protocol.VersionNumber) {
+		tlsConf.NextProtos = []string{versionToALPN(v)}
+	}
 
 	return &client{
 		hostname:      authorityAddr("https", hostname),
@@ -169,6 +174,7 @@ func (c *client) handleUnidirectionalStreams() {
 				return
 			}
 			f, err := parseNextFrame(str)
+			c.session.LogH3Frame(str, f)
 			if err != nil {
 				c.session.CloseWithError(quic.ApplicationErrorCode(errorFrameError), "")
 				return
@@ -280,6 +286,7 @@ func (c *client) doRequest(
 	}
 
 	frame, err := parseNextFrame(str)
+	c.session.LogH3Frame(str, frame)
 	if err != nil {
 		return nil, newStreamError(errorFrameError, err)
 	}
@@ -306,6 +313,7 @@ func (c *client) doRequest(
 		ProtoMajor: 3,
 		Header:     http.Header{},
 		TLS:        &connState,
+		Request:    req,
 	}
 	for _, hf := range hfs {
 		switch hf.Name {

@@ -119,10 +119,11 @@ type ConnectionTracer interface {
 	UpdatedMetrics(rttStats *RTTStats, cwnd, bytesInFlight ByteCount, packetsInFlight int)
 	AcknowledgedPacket(EncryptionLevel, PacketNumber)
 	LostPacket(EncryptionLevel, PacketNumber, PacketLossReason)
+	ValidatedECN(ECNValidationResult)
 	UpdatedCongestionState(CongestionState)
 	UpdatedPTOCount(value uint32)
-	UpdatedKeyFromTLS(EncryptionLevel, Perspective)
-	UpdatedKey(generation KeyPhase, remote bool)
+	UpdatedKeyFromTLS(EncryptionLevel, Perspective, []byte)
+	UpdatedKey(generation KeyPhase, remote bool, rcvKey, sendKey []byte)
 	DroppedEncryptionLevel(EncryptionLevel)
 	DroppedKey(generation KeyPhase)
 	SetLossTimer(TimerType, EncryptionLevel, time.Time)
@@ -130,5 +131,7 @@ type ConnectionTracer interface {
 	LossTimerCanceled()
 	// Close is called when the connection is closed.
 	Close()
+	H3Frame(StreamID, interface{})
+	H3SentHeader()
 	Debug(name, msg string)
 }

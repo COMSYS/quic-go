@@ -67,6 +67,8 @@ type Header struct {
 	typeByte     byte
 	Type         protocol.PacketType
 
+	SpinBit bool
+
 	Version          protocol.VersionNumber
 	SrcConnectionID  protocol.ConnectionID
 	DestConnectionID protocol.ConnectionID
@@ -142,6 +144,7 @@ func parseHeaderImpl(b *bytes.Reader, shortHeaderConnIDLen int) (*Header, error)
 
 func (h *Header) parseShortHeader(b *bytes.Reader, shortHeaderConnIDLen int) error {
 	var err error
+	h.SpinBit = h.typeByte&0x20 != 0
 	h.DestConnectionID, err = protocol.ReadConnectionID(b, shortHeaderConnIDLen)
 	return err
 }

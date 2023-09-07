@@ -232,12 +232,8 @@ func newCryptoSetup(
 	perspective protocol.Perspective,
 	version protocol.VersionNumber,
 ) (*cryptoSetup, <-chan *wire.TransportParameters /* ClientHello written. Receive nil for non-0-RTT */) {
-	initialSealer, initialOpener := NewInitialAEAD(connID, perspective, version)
-	if tracer != nil {
-		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
-		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
-	}
-	extHandler := newExtensionHandler(tp.Marshal(perspective), perspective, version)
+	initialSealer, initialOpener := NewInitialAEAD(connID, perspective, version, tracer)
+	extHandler := newExtensionHandler(tp.Marshal(perspective, version == protocol.VersionDraft27), perspective, version)
 	cs := &cryptoSetup{
 		tlsConf:                   tlsConf,
 		initialStream:             initialStream,
@@ -282,13 +278,9 @@ func newCryptoSetup(
 }
 
 func (h *cryptoSetup) ChangeConnectionID(id protocol.ConnectionID) {
-	initialSealer, initialOpener := NewInitialAEAD(id, h.perspective, h.version)
+	initialSealer, initialOpener := NewInitialAEAD(id, h.perspective, h.version, h.tracer)
 	h.initialSealer = initialSealer
 	h.initialOpener = initialOpener
-	if h.tracer != nil {
-		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
-		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
-	}
 }
 
 func (h *cryptoSetup) SetLargest1RTTAcked(pn protocol.PacketNumber) error {
@@ -402,7 +394,8 @@ func (h *cryptoSetup) checkEncryptionLevel(msgType messageType, encLevel protoco
 
 func (h *cryptoSetup) handleTransportParameters(data []byte) {
 	var tp wire.TransportParameters
-	if err := tp.Unmarshal(data, h.perspective.Opposite()); err != nil {
+	is27 := h.version == protocol.VersionDraft27
+	if err := tp.Unmarshal(data, h.perspective.Opposite(), is27); err != nil {
 		h.runner.OnError(&qerr.TransportError{
 			ErrorCode:    qerr.TransportParameterError,
 			ErrorMessage: err.Error(),
@@ -560,7 +553,7 @@ func (h *cryptoSetup) SetReadKey(encLevel qtls.EncryptionLevel, suite *qtls.Ciph
 		h.mutex.Unlock()
 		h.logger.Debugf("Installed 0-RTT Read keys (using %s)", qtls.CipherSuiteName(suite.ID))
 		if h.tracer != nil {
-			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective.Opposite())
+			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective.Opposite(), trafficSecret)
 		}
 		return
 	case qtls.EncryptionHandshake:
@@ -582,7 +575,7 @@ func (h *cryptoSetup) SetReadKey(encLevel qtls.EncryptionLevel, suite *qtls.Ciph
 	}
 	h.mutex.Unlock()
 	if h.tracer != nil {
-		h.tracer.UpdatedKeyFromTLS(h.readEncLevel, h.perspective.Opposite())
+		h.tracer.UpdatedKeyFromTLS(h.readEncLevel, h.perspective.Opposite(), trafficSecret)
 	}
 }
 
@@ -600,7 +593,7 @@ func (h *cryptoSetup) SetWriteKey(encLevel qtls.EncryptionLevel, suite *qtls.Cip
 		h.mutex.Unlock()
 		h.logger.Debugf("Installed 0-RTT Write keys (using %s)", qtls.CipherSuiteName(suite.ID))
 		if h.tracer != nil {
-			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective)
+			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective, trafficSecret)
 		}
 		return
 	case qtls.EncryptionHandshake:
@@ -629,7 +622,7 @@ func (h *cryptoSetup) SetWriteKey(encLevel qtls.EncryptionLevel, suite *qtls.Cip
 	}
 	h.mutex.Unlock()
 	if h.tracer != nil {
-		h.tracer.UpdatedKeyFromTLS(h.writeEncLevel, h.perspective)
+		h.tracer.UpdatedKeyFromTLS(h.writeEncLevel, h.perspective, trafficSecret)
 	}
 }
 
